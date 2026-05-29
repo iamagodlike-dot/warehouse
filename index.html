@@ -7,6 +7,41 @@
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script type="module" id="firebase-init">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getFirestore, doc, getDoc, setDoc, collection, getDocs } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+  const app = initializeApp({
+    apiKey: "AIzaSyCYK7Jftv6LcgiGqxDkH0IcWHIqb5tcXUQ",
+    authDomain: "warehouse-a1b6c.firebaseapp.com",
+    projectId: "warehouse-a1b6c",
+    storageBucket: "warehouse-a1b6c.firebasestorage.app",
+    messagingSenderId: "108353420882",
+    appId: "1:108353420882:web:d359e2b2602403b3eca98b"
+  });
+  const db = getFirestore(app);
+
+  window._db = {
+    async getConfig() {
+      const snap = await getDoc(doc(db, "config", "main"));
+      return snap.exists() ? snap.data() : null;
+    },
+    async setConfig(data) {
+      await setDoc(doc(db, "config", "main"), data);
+    },
+    async getAllCells() {
+      const snap = await getDocs(collection(db, "cells"));
+      const obj = {};
+      snap.forEach(d => { obj[d.id] = d.data(); });
+      return obj;
+    },
+    async setCell(id, data) {
+      await setDoc(doc(db, "cells", id), data);
+    }
+  };
+  window._dbReady = true;
+  window.dispatchEvent(new Event("db-ready"));
+</script>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -19,34 +54,15 @@
 <div id="root"></div>
 <script type="text/babel">
 const { useState, useEffect, useRef } = React;
-
-const SUPABASE_URL = "https://xylbirvrdpmvksnipqdo.supabase.co";
-const SUPABASE_KEY = "sb_publishable_22E_BhrtUIbGzyBvQewTyw_lUnm7jl6";
 const DEFAULT_CONFIG = { zones: [{ id: "A", label: "Зона A", rows: 4, cols: 6 }] };
 
-async function sbGet(table, id) {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}&select=*`, {
-    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
-  });
-  const rows = await r.json();
-  return rows[0]?.data ?? null;
-}
-async function sbUpsert(table, id, data) {
-  await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
-    method: "POST",
-    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json", Prefer: "resolution=merge-duplicates" },
-    body: JSON.stringify({ id, data, updated_at: new Date().toISOString() })
+function waitForDb() {
+  return new Promise(resolve => {
+    if (window._dbReady) { resolve(); return; }
+    window.addEventListener("db-ready", () => resolve(), { once: true });
   });
 }
-async function sbGetAllCells() {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/cells?select=id,data`, {
-    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
-  });
-  const rows = await r.json();
-  const obj = {};
-  if (Array.isArray(rows)) rows.forEach(row => { obj[row.id] = row.data; });
-  return obj;
-}
+
 function cellId(zoneId, row, col) {
   return `${zoneId}-${String(row+1).padStart(2,"0")}-${String(col+1).padStart(2,"0")}`;
 }
@@ -69,32 +85,45 @@ function App() {
   const pollRef = useRef(null);
 
   const loadAll = async () => {
+    await waitForDb();
     try {
-      const [cfg, cls] = await Promise.all([sbGet("config","main"), sbGetAllCells()]);
+      const [cfg, cls] = await Promise.all([window._db.getConfig(), window._db.getAllCells()]);
       if (cfg) setConfig(cfg);
       setCells(cls);
     } catch(e) { console.error(e); }
     setLoading(false);
   };
-  useEffect(() => { loadAll(); pollRef.current = setInterval(loadAll, 8000); return () => clearInterval(pollRef.current); }, []);
 
-  const saveConfig = async (cfg) => { setConfig(cfg); setSyncing(true); await sbUpsert("config","main",cfg); setSyncing(false); };
+  useEffect(() => {
+    loadAll();
+    pollRef.current = setInterval(loadAll, 8000);
+    return () => clearInterval(pollRef.current);
+  }, []);
+
+  const saveConfig = async (cfg) => {
+    setConfig(cfg); setSyncing(true);
+    await window._db.setConfig(cfg);
+    setSyncing(false);
+  };
+
   const saveCell = async (id, data) => {
     const updated = { ...data, openedAt: data.openedAt || new Date().toLocaleDateString("ru-RU") };
     setCells(prev => ({ ...prev, [id]: updated }));
     setModal(null); setSyncing(true);
-    await sbUpsert("cells", id, updated);
+    await window._db.setCell(id, updated);
     setSyncing(false);
   };
+
   const freeCell = async (id) => {
     const cell = cells[id]; if (!cell) return;
     const archive = cell._archive || [];
     const updated = { _archive: [...archive, { ...cell, freedAt: new Date().toLocaleDateString("ru-RU") }] };
     setCells(prev => ({ ...prev, [id]: updated }));
     setModal(null); setArchiveCell(null); setSyncing(true);
-    await sbUpsert("cells", id, updated);
+    await window._db.setCell(id, updated);
     setSyncing(false);
   };
+
   const openCell = (id, zone, row, col) => setModal({ id, zone, row, col, cell: cells[id] || null });
 
   const allCells = config.zones.flatMap(z =>
@@ -329,7 +358,6 @@ function ArchiveModal({cellId,cells,onFree,onClose}) {
 function ConfigModal({config,setConfig,newZone,setNewZone,onClose}) {
   const [confirmDelete,setConfirmDelete] = useState(null);
   const [editingId,setEditingId] = useState({});
-
   const addZone=()=>{
     if(!newZone.label.trim())return;
     const autoId=newZone.label.replace(/[^A-Za-z0-9]/g,"").slice(0,3).toUpperCase()||("Z"+(config.zones.length+1));
@@ -347,7 +375,6 @@ function ConfigModal({config,setConfig,newZone,setNewZone,onClose}) {
     setConfig({...config,zones:config.zones.map(z=>z.id===oldId?{...z,id:newId}:z)});
     setEditingId(e=>{const n={...e};delete n[oldId];return n;});
   };
-
   return (
     <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1020,padding:"1rem"}}>
       <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:12,width:"100%",maxWidth:560,maxHeight:"85vh",overflow:"auto",boxShadow:"0 20px 60px rgba(0,0,0,0.3)"}}>
@@ -379,7 +406,7 @@ function ConfigModal({config,setConfig,newZone,setNewZone,onClose}) {
           <div style={{border:"1px dashed #ddd",borderRadius:8,padding:12,marginTop:10}}>
             <div style={{fontSize:12,color:"#999",marginBottom:8}}>Добавить зону</div>
             <div style={{display:"grid",gridTemplateColumns:"80px 1fr 72px 72px auto",gap:8}}>
-              <input value={newZone.customId||""} onChange={e=>setNewZone(n=>({...n,customId:e.target.value.toUpperCase().slice(0,6),_err:""}))} placeholder="B" maxLength={6} style={{...iSt,fontFamily:"'IBM Plex Mono',monospace",textAlign:"center",fontWeight:600}} title="Индекс"/>
+              <input value={newZone.customId||""} onChange={e=>setNewZone(n=>({...n,customId:e.target.value.toUpperCase().slice(0,6),_err:""}))} placeholder="B" maxLength={6} style={{...iSt,fontFamily:"'IBM Plex Mono',monospace",textAlign:"center",fontWeight:600}}/>
               <input value={newZone.label} onChange={e=>setNewZone(n=>({...n,label:e.target.value,_err:""}))} placeholder="Название зоны" style={{...iSt,borderColor:newZone._err?"#e57373":undefined}} onKeyDown={e=>{if(e.key==="Enter")addZone();}}/>
               <input type="number" min="1" max="20" value={newZone.rows} onChange={e=>setNewZone(n=>({...n,rows:e.target.value}))} style={{...iSt,textAlign:"center"}} title="Рядов"/>
               <input type="number" min="1" max="20" value={newZone.cols} onChange={e=>setNewZone(n=>({...n,cols:e.target.value}))} style={{...iSt,textAlign:"center"}} title="Столбцов"/>
