@@ -1,36 +1,32 @@
 import { useState, useEffect, useRef } from "react";
+import { initializeApp } from "firebase/app";
+import { getFirestore, doc, getDoc, setDoc, collection, getDocs } from "firebase/firestore";
 
-const SUPABASE_URL = "https://xylbirvrdpmvksnipqdo.supabase.co";
-const SUPABASE_KEY = "sb_publishable_22E_BhrtUIbGzyBvQewTyw_lUnm7jl6";
+const firebaseApp = initializeApp({
+  apiKey: "AIzaSyCYK7Jftv6LcgiGqxDkH0IcWHIqb5tcXUQ",
+  authDomain: "warehouse-a1b6c.firebaseapp.com",
+  projectId: "warehouse-a1b6c",
+  storageBucket: "warehouse-a1b6c.firebasestorage.app",
+  messagingSenderId: "108353420882",
+  appId: "1:108353420882:web:d359e2b2602403b3eca98b"
+});
+const db = getFirestore(firebaseApp);
 
 const DEFAULT_CONFIG = { zones: [{ id: "A", label: "Зона A", rows: 4, cols: 6 }] };
 
 async function sbGet(table, id) {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}&select=*`, {
-    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
-  });
-  const rows = await r.json();
-  return rows[0]?.data ?? null;
+  const snap = await getDoc(doc(db, table, id));
+  return snap.exists() ? snap.data() : null;
 }
 
 async function sbUpsert(table, id, data) {
-  await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json", Prefer: "resolution=merge-duplicates"
-    },
-    body: JSON.stringify({ id, data, updated_at: new Date().toISOString() })
-  });
+  await setDoc(doc(db, table, id), data);
 }
 
 async function sbGetAllCells() {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/cells?select=id,data`, {
-    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` }
-  });
-  const rows = await r.json();
+  const snap = await getDocs(collection(db, "cells"));
   const obj = {};
-  if (Array.isArray(rows)) rows.forEach(row => { obj[row.id] = row.data; });
+  snap.forEach(d => { obj[d.id] = d.data(); });
   return obj;
 }
 
