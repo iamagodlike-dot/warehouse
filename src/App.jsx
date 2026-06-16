@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { initializeApp } from "firebase/app";
 import { getFirestore, doc, getDoc, setDoc, collection, getDocs } from "firebase/firestore";
+import QRCode from "qrcode";
 
 const firebaseApp = initializeApp({
   apiKey: "AIzaSyCYK7Jftv6LcgiGqxDkH0IcWHIqb5tcXUQ",
@@ -12,7 +13,7 @@ const firebaseApp = initializeApp({
 });
 const db = getFirestore(firebaseApp);
 
-const DEFAULT_CONFIG = { zones: [{ id: "A", label: "Зона A", rows: 4, cols: 6 }] };
+const DEFAULT_CONFIG = { zones: [{ id: "A", label: "Зона A", rows: 4, cols: 6 }], staleDays: 7 };
 
 async function sbGet(table, id) {
   const snap = await getDoc(doc(db, table, id));
@@ -30,12 +31,37 @@ async function sbGetAllCells() {
   return obj;
 }
 
+async function addLog(action, cellId, details) {
+  const id = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  await setDoc(doc(db, "log", id), { action, cellId, details, ts: Date.now() });
+}
+
+async function sbGetLog() {
+  const snap = await getDocs(collection(db, "log"));
+  const arr = [];
+  snap.forEach(d => arr.push(d.data()));
+  arr.sort((a, b) => b.ts - a.ts);
+  return arr.slice(0, 200);
+}
 
 function cellId(zoneId, row, col) {
   return `${zoneId}-${String(row + 1).padStart(2, "0")}-${String(col + 1).padStart(2, "0")}`;
 }
 
-const LOGO_SVG = `<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><polygon points="100,20 175,170 25,170" opacity="0.15"/><polygon points="100,20 175,170 25,170" fill="none" stroke="currentColor" stroke-width="8"/><polygon points="60,170 140,170 115,110 85,110" opacity="0.7"/></svg>`;
+function parseCellId(id, config) {
+  const m = id.match(/^(.+)-(\d+)-(\d+)$/);
+  if (!m) return null;
+  const zone = config.zones.find(z => z.id === m[1]);
+  if (!zone) return null;
+  return { zone, row: +m[2] - 1, col: +m[3] - 1 };
+}
+
+function daysOpen(openedAt) {
+  if (!openedAt) return 0;
+  const [d, mo, y] = openedAt.split(".").map(Number);
+  if (!d || !mo || !y) return 0;
+  return Math.floor((Date.now() - new Date(y, mo - 1, d).getTime()) / 86400000);
+}
 
 export default function App() {
   const [cells, setCells] = useState({});
@@ -50,7 +76,10 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [newZone, setNewZone] = useState({ label: "", rows: 3, cols: 5, customId: "" });
   const [labelModal, setLabelModal] = useState(null);
+  const [logEntries, setLogEntries] = useState([]);
+  const [logLoading, setLogLoading] = useState(false);
   const pollRef = useRef(null);
+  const urlOpenedRef = useRef(false);
 
   const loadAll = async () => {
     try {
@@ -61,11 +90,30 @@ export default function App() {
     setLoading(false);
   };
 
+  const loadLog = async () => {
+    setLogLoading(true);
+    try { setLogEntries(await sbGetLog()); } catch (e) { console.error(e); }
+    setLogLoading(false);
+  };
+
   useEffect(() => {
     loadAll();
     pollRef.current = setInterval(loadAll, 8000);
     return () => clearInterval(pollRef.current);
   }, []);
+
+  useEffect(() => {
+    if (view === "log") loadLog();
+  }, [view]);
+
+  useEffect(() => {
+    if (loading || urlOpenedRef.current) return;
+    urlOpenedRef.current = true;
+    const cellParam = new URLSearchParams(window.location.search).get("cell");
+    if (!cellParam) return;
+    const parsed = parseCellId(cellParam, config);
+    if (parsed) openCell(cellParam, parsed.zone, parsed.row, parsed.col);
+  }, [loading]);
 
   const saveConfig = async (cfg) => {
     setConfig(cfg);
@@ -80,6 +128,7 @@ export default function App() {
     setModal(null);
     setSyncing(true);
     await sbUpsert("cells", id, updated);
+    await addLog("Изменена", id, `${updated.car || "—"} · ${updated.orderNum || "—"}`);
     setSyncing(false);
   };
 
@@ -93,6 +142,7 @@ export default function App() {
     setArchiveCell(null);
     setSyncing(true);
     await sbUpsert("cells", id, updated);
+    await addLog("Освобождена", id, `${cell.car || "—"} · ${cell.orderNum || "—"}`);
     setSyncing(false);
   };
 
@@ -123,7 +173,7 @@ export default function App() {
 
   if (loading) return (
     <div style={{ minHeight: "100vh", background: "#0f0f0f", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 16 }}>
-      <div style={{ width: 48, height: 48, color: "#fff" }} dangerouslySetInnerHTML={{ __html: LOGO_SVG }} />
+      <img src="/logo-mark-white.png" style={{ width: 48, height: 48 }} />
       <div style={{ color: "#aaa", fontFamily: "monospace", letterSpacing: 2, fontSize: 13 }}>ЗАГРУЗКА СКЛАДА...</div>
     </div>
   );
@@ -133,7 +183,7 @@ export default function App() {
       <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
 
       <header style={{ background: "#0f0f0f", color: "#fff", padding: "0 2rem", display: "flex", alignItems: "center", gap: "1rem", height: 60 }}>
-        <div style={{ width: 30, height: 30, color: "#fff" }} dangerouslySetInnerHTML={{ __html: LOGO_SVG }} />
+        <img src="/logo-mark-white.png" style={{ width: 30, height: 30 }} />
         <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontWeight: 500, fontSize: 14, letterSpacing: 2, textTransform: "uppercase" }}>СКЛАД ЗАПЧАСТЕЙ</span>
         <div style={{ flex: 1 }} />
         {syncing && <div style={{ fontSize: 12, color: "#666", fontFamily: "monospace" }}>⟳ сохранение...</div>}
@@ -146,7 +196,7 @@ export default function App() {
       </header>
 
       <div style={{ background: "#fff", borderBottom: "1px solid #e8e8e8", display: "flex", padding: "0 2rem" }}>
-        {[["grid", "🗺 Схема склада"], ["search", "🔍 Поиск"], ["labels", "🖨 Печать"]].map(([key, label]) => (
+        {[["grid", "🗺 Схема склада"], ["search", "🔍 Поиск"], ["stats", "📊 Статистика"], ["labels", "🖨 Печать"], ["log", "📋 Журнал"]].map(([key, label]) => (
           <button key={key} onClick={() => setView(key)} style={{
             background: "none", border: "none", borderBottom: view === key ? "2px solid #0f0f0f" : "2px solid transparent",
             padding: "14px 18px", cursor: "pointer", fontSize: 13, fontWeight: view === key ? 600 : 400,
@@ -158,7 +208,9 @@ export default function App() {
       <main style={{ padding: "2rem", maxWidth: 1200, margin: "0 auto" }}>
         {view === "grid" && <GridView config={config} cells={cells} onOpen={openCell} />}
         {view === "search" && <SearchView allCells={allCells} search={search} setSearch={setSearch} filtered={filtered} onOpen={openCell} onArchive={setArchiveCell} />}
+        {view === "stats" && <StatsView config={config} allCells={allCells} onOpen={openCell} />}
         {view === "labels" && <LabelsView config={config} cells={cells} onPrint={setPrintCell} onLabelPrint={setLabelModal} />}
+        {view === "log" && <LogView entries={logEntries} loading={logLoading} onRefresh={loadLog} />}
       </main>
 
       {modal && <CellModal modal={modal} config={config} onSave={saveCell} onFree={freeCell} onArchive={setArchiveCell} onClose={() => setModal(null)} />}
@@ -171,6 +223,7 @@ export default function App() {
 }
 
 function GridView({ config, cells, onOpen }) {
+  const staleDays = config.staleDays || 7;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "2.5rem" }}>
       {config.zones.map(zone => (
@@ -186,19 +239,24 @@ function GridView({ config, cells, onOpen }) {
                 const id = cellId(zone.id, r, c);
                 const data = cells[id];
                 const isOccupied = data?.orderNum;
+                const isStale = isOccupied && daysOpen(data.openedAt) >= staleDays;
+                const color = isStale ? "#c62828" : isOccupied ? "#ff9800" : "#4caf50";
+                const bg = isStale ? "#fdecea" : isOccupied ? "#fff8e1" : "#e8f5e9";
                 return (
                   <button key={id} onClick={() => onOpen(id, zone, r, c)} style={{
-                    border: `2px solid ${isOccupied ? "#ff9800" : "#4caf50"}`,
-                    background: isOccupied ? "#fff8e1" : "#e8f5e9",
+                    border: `2px solid ${color}`,
+                    background: bg,
                     borderRadius: 8, padding: "10px 8px", cursor: "pointer", textAlign: "left",
                     transition: "all 0.15s", minHeight: 80
                   }}>
-                    <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, fontWeight: 600, color: isOccupied ? "#e65100" : "#2e7d32", marginBottom: 4 }}>{id}</div>
+                    <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, fontWeight: 600, color: isStale ? "#c62828" : isOccupied ? "#e65100" : "#2e7d32", marginBottom: 4, display: "flex", alignItems: "center", gap: 4 }}>
+                      {isStale && <span title={`Стоит ${daysOpen(data.openedAt)} дн.`}>⚠</span>}{id}
+                    </div>
                     {isOccupied ? (
                       <>
                         <div style={{ fontSize: 11, fontWeight: 600, color: "#333", lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{data.car}</div>
                         <div style={{ fontSize: 10, color: "#666", marginTop: 2 }}>{data.orderNum}</div>
-                        <div style={{ fontSize: 10, color: "#999", marginTop: 2 }}>{data.parts?.length || 0} дет.</div>
+                        <div style={{ fontSize: 10, color: isStale ? "#c62828" : "#999", marginTop: 2 }}>{data.parts?.length || 0} дет. · {daysOpen(data.openedAt)} дн.</div>
                       </>
                     ) : (
                       <div style={{ fontSize: 11, color: "#4caf50", marginTop: 4 }}>+ свободна</div>
@@ -210,6 +268,102 @@ function GridView({ config, cells, onOpen }) {
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+function StatsView({ config, allCells, onOpen }) {
+  const staleDays = config.staleDays || 7;
+  const zoneStats = config.zones.map(z => {
+    const zCells = allCells.filter(c => c.zone.id === z.id);
+    const occ = zCells.filter(c => c.data?.orderNum);
+    return { zone: z, total: zCells.length, occupied: occ.length };
+  });
+  const occupiedCells = allCells.filter(c => c.data?.orderNum);
+  const avgDays = occupiedCells.length
+    ? Math.round(occupiedCells.reduce((s, c) => s + daysOpen(c.data.openedAt), 0) / occupiedCells.length)
+    : 0;
+  const staleCells = occupiedCells
+    .filter(c => daysOpen(c.data.openedAt) >= staleDays)
+    .sort((a, b) => daysOpen(b.data.openedAt) - daysOpen(a.data.openedAt));
+
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12, marginBottom: "2rem" }}>
+        <div style={{ background: "#fff", border: "1px solid #e8e8e8", borderRadius: 10, padding: "1.25rem" }}>
+          <div style={{ fontSize: 11, color: "#999", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>Занято ячеек</div>
+          <div style={{ fontSize: 28, fontWeight: 700 }}>{occupiedCells.length} <span style={{ fontSize: 15, color: "#999", fontWeight: 400 }}>/ {allCells.length}</span></div>
+        </div>
+        <div style={{ background: "#fff", border: "1px solid #e8e8e8", borderRadius: 10, padding: "1.25rem" }}>
+          <div style={{ fontSize: 11, color: "#999", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>Средний срок хранения</div>
+          <div style={{ fontSize: 28, fontWeight: 700 }}>{avgDays} <span style={{ fontSize: 15, color: "#999", fontWeight: 400 }}>дн.</span></div>
+        </div>
+        <div style={{ background: staleCells.length ? "#fdecea" : "#fff", border: `1px solid ${staleCells.length ? "#f5c6c2" : "#e8e8e8"}`, borderRadius: 10, padding: "1.25rem" }}>
+          <div style={{ fontSize: 11, color: staleCells.length ? "#c62828" : "#999", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>Зависших (&gt;{staleDays} дн.)</div>
+          <div style={{ fontSize: 28, fontWeight: 700, color: staleCells.length ? "#c62828" : "#1a1a1a" }}>{staleCells.length}</div>
+        </div>
+      </div>
+
+      <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10 }}>По зонам</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: "2rem" }}>
+        {zoneStats.map(({ zone, total, occupied }) => {
+          const pct = total ? Math.round((occupied / total) * 100) : 0;
+          return (
+            <div key={zone.id} style={{ background: "#fff", border: "1px solid #e8e8e8", borderRadius: 8, padding: "10px 14px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                <div style={{ background: "#0f0f0f", color: "#fff", fontFamily: "'IBM Plex Mono',monospace", padding: "2px 10px", borderRadius: 4, fontSize: 12 }}>{zone.id}</div>
+                <span style={{ fontWeight: 600, fontSize: 13, flex: 1 }}>{zone.label}</span>
+                <span style={{ fontSize: 12, color: "#666" }}>{occupied} / {total} ({pct}%)</span>
+              </div>
+              <div style={{ height: 6, background: "#f0f0f0", borderRadius: 3, overflow: "hidden" }}>
+                <div style={{ width: `${pct}%`, height: "100%", background: pct > 80 ? "#e65100" : "#0f0f0f" }} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10 }}>Зависшие ячейки</div>
+      {staleCells.length === 0 ? (
+        <div style={{ color: "#999", fontSize: 13 }}>Нет ячеек с превышением срока хранения</div>
+      ) : (
+        staleCells.map(({ id, zone, row, col, data }) => (
+          <div key={id} onClick={() => onOpen(id, zone, row, col)} style={{ background: "#fff", border: "1px solid #f5c6c2", borderRadius: 8, padding: "12px 16px", marginBottom: 8, cursor: "pointer", display: "flex", alignItems: "center", gap: "1rem" }}>
+            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 13, fontWeight: 600, background: "#c62828", color: "#fff", padding: "4px 10px", borderRadius: 4 }}>{id}</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>{data.car} · {data.orderNum}</div>
+              <div style={{ color: "#666", fontSize: 12 }}>Открыта: {data.openedAt}</div>
+            </div>
+            <div style={{ color: "#c62828", fontWeight: 600, fontSize: 13 }}>{daysOpen(data.openedAt)} дн.</div>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+function LogView({ entries, loading, onRefresh }) {
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", marginBottom: "1.5rem" }}>
+        <div style={{ color: "#666", fontSize: 14 }}>Последние действия на складе</div>
+        <div style={{ flex: 1 }} />
+        <button onClick={onRefresh} style={{ background: "none", border: "1px solid #ddd", borderRadius: 6, padding: "5px 14px", cursor: "pointer", fontSize: 13 }}>↻ Обновить</button>
+      </div>
+      {loading ? (
+        <div style={{ color: "#999", fontSize: 13 }}>Загрузка...</div>
+      ) : entries.length === 0 ? (
+        <div style={{ color: "#999", fontSize: 13 }}>Журнал пуст</div>
+      ) : (
+        entries.map((e, i) => (
+          <div key={i} style={{ background: "#fff", border: "1px solid #e8e8e8", borderRadius: 8, padding: "12px 16px", marginBottom: 8, display: "flex", alignItems: "center", gap: "1rem" }}>
+            <div style={{ fontSize: 12, color: "#999", whiteSpace: "nowrap", fontFamily: "'IBM Plex Mono',monospace" }}>{new Date(e.ts).toLocaleString("ru-RU")}</div>
+            <div style={{ fontSize: 12, fontWeight: 600, background: e.action === "Освобождена" ? "#e8f5e9" : "#fff8e1", color: e.action === "Освобождена" ? "#2e7d32" : "#e65100", padding: "3px 10px", borderRadius: 4 }}>{e.action}</div>
+            <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, fontWeight: 600 }}>{e.cellId}</div>
+            <div style={{ flex: 1, fontSize: 13, color: "#666" }}>{e.details}</div>
+          </div>
+        ))
+      )}
     </div>
   );
 }
@@ -461,6 +615,14 @@ function ConfigModal({ config, setConfig, newZone, setNewZone, onClose }) {
             {newZone._err && <div style={{ fontSize: 12, color: "#e57373", marginTop: 6 }}>{newZone._err}</div>}
           </div>
 
+          <div style={{ marginTop: "1.5rem", borderTop: "1px solid #eee", paddingTop: "1.5rem" }}>
+            <div style={{ fontWeight: 600, fontSize: 13, color: "#666", marginBottom: 10, textTransform: "uppercase", letterSpacing: 0.5 }}>Зависшие ячейки</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ fontSize: 13, color: "#666" }}>Считать ячейку зависшей через</span>
+              <input type="number" min="1" max="90" value={config.staleDays || 7} onChange={e => setConfig({ ...config, staleDays: +e.target.value || 1 })} style={{ ...inputSt, width: 64, textAlign: "center" }} />
+              <span style={{ fontSize: 13, color: "#666" }}>дн.</span>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -468,33 +630,77 @@ function ConfigModal({ config, setConfig, newZone, setNewZone, onClose }) {
 }
 
 const LABEL_SIZES = [
-  { id: "xs",   label: "XS — 40×20 мм",  w: 40, h: 20, cols: 5, numPt: 14 },
-  { id: "s",    label: "S — 52×30 мм",   w: 52, h: 30, cols: 4, numPt: 18 },
-  { id: "m",    label: "M — 70×40 мм",   w: 70, h: 40, cols: 3, numPt: 24 },
-  { id: "l",    label: "L — 90×50 мм",   w: 90, h: 50, cols: 2, numPt: 30 },
-  { id: "xl",   label: "XL — 105×74 мм", w: 105, h: 74, cols: 2, numPt: 38 },
-  { id: "a4",   label: "A4 — 1 этикетка на лист", w: 190, h: 267, cols: 1, numPt: 72 },
+  { id: "xs",   label: "XS — 40×20 мм",  w: 40, h: 20, cols: 5, numPt: 14, qr: false },
+  { id: "s",    label: "S — 52×30 мм",   w: 52, h: 30, cols: 4, numPt: 18, qr: false },
+  { id: "m",    label: "M — 70×40 мм",   w: 70, h: 40, cols: 3, numPt: 22, qr: true },
+  { id: "l",    label: "L — 90×50 мм",   w: 90, h: 50, cols: 2, numPt: 28, qr: true },
+  { id: "xl",   label: "XL — 105×74 мм", w: 105, h: 74, cols: 2, numPt: 34, qr: true },
+  { id: "a4",   label: "A4 — 1 этикетка на лист", w: 190, h: 267, cols: 1, numPt: 64, qr: true },
 ];
 
 function LabelPrintModal({ zone, onClose }) {
   const [sizeId, setSizeId] = useState("s");
+  const [printing, setPrinting] = useState(false);
   const cells = Array.from({ length: zone.rows }, (_, r) =>
     Array.from({ length: zone.cols }, (_, c) => cellId(zone.id, r, c))
   ).flat();
 
-  const doPrint = () => {
+  const doPrint = async () => {
     const sz = LABEL_SIZES.find(s => s.id === sizeId);
+    setPrinting(true);
+    let qrMap = {};
+    if (sz.qr) {
+      // quiet-zone margin baked into the PNG so the code stays scannable when shrunk
+      for (const id of cells) {
+        const url = `${window.location.origin}${window.location.pathname}?cell=${id}`;
+        qrMap[id] = await QRCode.toDataURL(url, { margin: 1, width: 300 });
+      }
+    }
+    setPrinting(false);
+
+    const isA4 = sz.id === "a4";
+    const pad = Math.max(2, Math.round(sz.h * 0.07));
+    const qrPad = Math.max(1, Math.round(pad * 0.4));
+    const qrSizeMm = isA4
+      ? Math.round(sz.w * 0.58)
+      : Math.round(Math.min(sz.w * 0.36, sz.h - pad * 2) - qrPad * 2);
+    const layout = isA4 ? "column" : "row";
+    const accentSize = Math.max(6, Math.round(Math.min(sz.w, sz.h) * 0.2));
+    const logoSize = Math.round(accentSize * 0.74 * 10) / 10;
+    const logoUrl = `${window.location.origin}/logo-mark.png`;
+
+    const labelInner = (id) => {
+      const qrImg = qrMap[id]
+        ? `<div class="qrbox"><img class="qr" src="${qrMap[id]}" width="${qrSizeMm}mm" height="${qrSizeMm}mm" /></div>`
+        : "";
+      const textBlock = `<div class="text"><div class="zone">${zone.label}</div><div class="top">Ячейка</div><div class="num">${id}</div></div>`;
+      const divider = qrMap[id] ? `<div class="divider"></div>` : "";
+      const inner = isA4 ? `${textBlock}${divider}${qrImg}` : `${qrImg}${divider}${textBlock}`;
+      const accent = `<div class="accent"><img class="logo" src="${logoUrl}" width="${logoSize}mm" height="${logoSize}mm" /></div>`;
+      return `${accent}<div class="content">${inner}</div>`;
+    };
+
     const w = window.open("", "_blank");
-    const pageBreak = sz.id === "a4" ? "page-break-after:always;" : "";
+    const pageBreak = isA4 ? "page-break-after:always;" : "";
     w.document.write(`<html><head><title>Этикетки ${zone.label}</title><style>
-      body{margin:0;font-family:'IBM Plex Mono',monospace}
+      *{box-sizing:border-box}
+      body{margin:0;font-family:'IBM Plex Sans','Helvetica Neue',sans-serif}
       .grid{display:grid;grid-template-columns:repeat(${sz.cols},${sz.w}mm)}
-      .label{border:1px solid #333;width:${sz.w}mm;height:${sz.h}mm;display:flex;flex-direction:column;align-items:center;justify-content:center;box-sizing:border-box;${pageBreak}}
-      .top{font-size:${Math.round(sz.numPt * 0.45)}pt;color:#666;letter-spacing:1px;text-transform:uppercase;margin-bottom:${sz.h > 35 ? 6 : 3}px}
-      .num{font-size:${sz.numPt}pt;font-weight:700;letter-spacing:2px}
+      .label{border:1.5px solid #1a1a1a;width:${sz.w}mm;height:${sz.h}mm;display:flex;flex-direction:${layout};${pageBreak};overflow:hidden}
+      .accent{flex-shrink:0;background:#fff;display:flex;align-items:center;justify-content:center;${isA4 ? `width:100%;height:${accentSize}mm;border-bottom:1.5px solid #1a1a1a` : `width:${accentSize}mm;height:100%;border-right:1.5px solid #1a1a1a`}}
+      .logo{object-fit:contain}
+      .content{flex:1;min-width:0;min-height:0;display:flex;flex-direction:${layout};align-items:center;justify-content:center;gap:${pad * 0.7}mm;padding:${pad}mm}
+      .qrbox{background:#fff;border:1px solid #ddd;padding:${qrPad}mm;display:flex;flex-shrink:0;line-height:0}
+      .divider{${isA4 ? `width:60%;height:1px;margin:${pad * 0.3}mm 0` : `width:1px;align-self:stretch;margin:${pad * 0.3}mm 0`};background:#e3e3e3}
+      .text{display:flex;flex-direction:column;align-items:${isA4 ? "center" : "flex-start"};min-width:0}
+      .zone{font-size:${Math.round(sz.numPt * 0.32)}pt;color:#aaa;letter-spacing:0.5px;margin-bottom:${Math.max(1, Math.round(sz.numPt * 0.08))}px;font-weight:500}
+      .top{font-size:${Math.round(sz.numPt * 0.36)}pt;color:#1a1a1a;letter-spacing:1.5px;text-transform:uppercase;font-weight:600;margin-bottom:${Math.max(2, Math.round(sz.numPt * 0.16))}px;opacity:0.55}
+      .num{font-family:'IBM Plex Mono',monospace;font-size:${sz.numPt}pt;font-weight:700;letter-spacing:0.5px;line-height:1;color:#1a1a1a}
       @media print{@page{size:A4;margin:8mm}}
-    </style></head><body><div class="grid">
-    ${cells.map(id => `<div class="label"><div class="top">ЯЧЕЙКА</div><div class="num">${id}</div></div>`).join("")}
+    </style>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@700&display=swap" rel="stylesheet" />
+    </head><body><div class="grid">
+    ${cells.map(id => `<div class="label">${labelInner(id)}</div>`).join("")}
     </div><script>window.print();<\/script></body></html>`);
     w.document.close();
   };
@@ -511,12 +717,13 @@ function LabelPrintModal({ zone, onClose }) {
             {LABEL_SIZES.map(sz => (
               <label key={sz.id} style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", padding: "8px 12px", borderRadius: 8, border: `1px solid ${sizeId === sz.id ? "#0f0f0f" : "#e0e0e0"}`, background: sizeId === sz.id ? "#f5f5f5" : "#fff" }}>
                 <input type="radio" name="labelSize" value={sz.id} checked={sizeId === sz.id} onChange={() => setSizeId(sz.id)} style={{ accentColor: "#0f0f0f" }} />
-                <span style={{ fontSize: 14 }}>{sz.label}</span>
+                <span style={{ fontSize: 14, flex: 1 }}>{sz.label}</span>
+                {sz.qr && <span style={{ fontSize: 11, color: "#999" }}>+ QR</span>}
               </label>
             ))}
           </div>
         </div>
-        <button onClick={doPrint} style={{ background: "#0f0f0f", color: "#fff", border: "none", borderRadius: 8, padding: "10px 32px", cursor: "pointer", fontSize: 14, fontWeight: 600, marginRight: 8 }}>Печатать</button>
+        <button onClick={doPrint} disabled={printing} style={{ background: "#0f0f0f", color: "#fff", border: "none", borderRadius: 8, padding: "10px 32px", cursor: printing ? "default" : "pointer", fontSize: 14, fontWeight: 600, marginRight: 8, opacity: printing ? 0.6 : 1 }}>{printing ? "Готовлю..." : "Печатать"}</button>
         <button onClick={onClose} style={{ background: "none", border: "1px solid #ddd", borderRadius: 8, padding: "10px 20px", cursor: "pointer", fontSize: 14 }}>Отмена</button>
       </div>
     </div>
